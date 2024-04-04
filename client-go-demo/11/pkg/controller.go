@@ -2,6 +2,7 @@ package pkg
 
 import (
 	"context"
+	v14 "k8s.io/api/core/v1"
 	v12 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	v13 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -53,7 +54,7 @@ func (c *controller) enqueue(obj interface{}) {
 func (c *controller) deleteIngress(obj interface{}) {
 	ingress := obj.(*v12.Ingress)
 	ownerReference := v13.GetControllerOf(ingress)
-	if ownerReference != nil {
+	if ownerReference == nil {
 		return
 	}
 	if ownerReference.Kind != "Service" {
@@ -80,6 +81,7 @@ func (c *controller) processNextItem() bool {
 	if shutdown {
 		return false
 	}
+	defer c.queue.Done(item)
 	key := item.(string)
 
 	err := c.syncService(key)
@@ -107,13 +109,13 @@ func (c *controller) syncService(key string) error {
 	// 新增 和 删除
 	_, ok := service.GetAnnotations()["ingress/http"]
 	ingress, err := c.ingressLister.Ingresses(namespaceKey).Get(name)
-	if err != nil && errors.IsNotFound(err) {
+	if err != nil && !errors.IsNotFound(err) {
 		return err
 	}
 
 	if ok && errors.IsNotFound(err) {
 		// 创建 ingress
-		ig := c.constructIngress(namespaceKey, name)
+		ig := c.constructIngress(service)
 		_, err := c.client.NetworkingV1().Ingresses(namespaceKey).Create(context.TODO(), ig, v13.CreateOptions{})
 		if err != nil {
 			return err
@@ -136,14 +138,22 @@ func (c *controller) handlerError(key string, err error) {
 	c.queue.Forget(key)
 }
 
-func (c *controller) constructIngress(namespaceKey string, name string) *v12.Ingress {
+func (c *controller) constructIngress(service *v14.Service) *v12.Ingress {
 	ingress := v12.Ingress{}
-	ingress.Name = name
-	ingress.Namespace = namespaceKey
+
+	ingress.ObjectMeta.OwnerReferences = []v13.OwnerReference{
+		*v13.NewControllerRef(service, v14.SchemeGroupVersion.WithKind("Service")),
+	}
+
+	ingress.Name = service.Name
+	ingress.Namespace = service.Namespace
 	pathType := v12.PathTypePrefix
+	icn := "nginx"
 	ingress.Spec = v12.IngressSpec{
+		IngressClassName: &icn,
 		Rules: []v12.IngressRule{
-			{Host: "example.com",
+			{
+				Host: "example.com",
 				IngressRuleValue: v12.IngressRuleValue{
 					HTTP: &v12.HTTPIngressRuleValue{
 						Paths: []v12.HTTPIngressPath{
@@ -152,7 +162,7 @@ func (c *controller) constructIngress(namespaceKey string, name string) *v12.Ing
 								PathType: &pathType,
 								Backend: v12.IngressBackend{
 									Service: &v12.IngressServiceBackend{
-										Name: name,
+										Name: service.Name,
 										Port: v12.ServiceBackendPort{
 											Number: 80,
 										},
@@ -161,7 +171,8 @@ func (c *controller) constructIngress(namespaceKey string, name string) *v12.Ing
 							},
 						},
 					},
-				}},
+				},
+			},
 		},
 	}
 
